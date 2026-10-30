@@ -23,7 +23,28 @@ the old `sessionPersistence.prepare()` API.
 ## Mounting
 
 The stock `agent-loop` owns the single `ctx.agents` factory slot and 0.2 throws
-when a second factory registers. Disable it and mount this plugin instead:
+when a second factory registers. The package therefore ships as a DSH bundle:
+`dsh.bundle.patch` points at `dsh.bundle.yml`, whose layer disables the stock
+loop and inserts the pi factory.
+
+Install it like any other bundle:
+
+```bash
+dsh plugin --profile <name> add dsh-pi-agent
+```
+
+`dsh plugin` appends the package to `dsh.profile.bundles`, so the DSH plugin
+manager / market lists it as a normal switch. Turning it **off** removes the
+package from `dsh.profile.bundles`; the whole layer (both the pi insert and the
+`agent-loop` disable) stops applying, and the native loop is back. Turning it
+**on** re-adds the layer. A restart — or the host's HMR reload — applies the
+change.
+
+Bundle defaults live in `dsh.bundle.yml`; a profile's own `cordis.patch.yml`
+can still override `pi-agent` config by id (for example `model` or `cwd`).
+
+The manual equivalent, for profiles without a plugin manager, is the same two
+rows copied into `cordis.patch.yml`:
 
 ```yaml
 - id: agent-loop
@@ -46,7 +67,11 @@ The DSH-selected model route must exist in pi's own provider config
 
 - DSH `0.2.0-rc.2` CLI — headless session and the Web UI (session completed,
   streamed answer rendered, `1 turns 1 steps`) with `agent-loop` disabled.
-- DSH `0.2.1-rc.3` CLI — headless session completed.
+- DSH `0.2.1-rc.3` CLI — headless session completed, both with the manual
+  patch mount and as an installed bundle.
+- Bundle toggle semantics: with `dsh-pi-agent` in `dsh.profile.bundles` the
+  composed config disables `agent-loop` and inserts `pi-agent`; removing the
+  bundle name restores the native `agent-loop` and drops `pi-agent`.
 
 ## Known limitations
 
@@ -61,5 +86,7 @@ The DSH-selected model route must exist in pi's own provider config
 
 ## Rollback
 
-Remove the `pi-agent` insert and the `agent-loop` disable from
-`cordis.patch.yml` (or restore the `.bak-pi-*` backups), then restart DSH.
+Bundle install: turn `dsh-pi-agent` off in the plugin manager (or remove it
+from `dsh.profile.bundles`), then restart DSH. Manual mount: remove the
+`pi-agent` insert and the `agent-loop` disable from `cordis.patch.yml`, or
+restore the profile's `.bak-*` backups, then restart.

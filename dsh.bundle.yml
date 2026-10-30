@@ -1,0 +1,16 @@
+# dsh-pi-agent bundle layer.
+#
+# The pi loop replaces DSH's native agent loop. DSH 0.2 allows exactly one
+# registered AgentFactory, and the stock loop registers eagerly on
+# construction, so mounting pi means disabling the stock loop in the same
+# layer. Turning this bundle off drops the whole layer — including the
+# disable — and the native loop is back.
+- id: agent-loop
+  disabled: true
+
+- insert:
+    - id: pi-agent
+      name: 'dsh-pi-agent'
+      config:
+        piPath: 'pi'
+        debug: true
