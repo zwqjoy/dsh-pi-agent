@@ -12,6 +12,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { resolve } from 'node:path'
 import { resolvePiPath } from './pi-path.ts'
+import { dshCredentialEnv } from './dsh-credentials.ts'
 
 /** Minimal structural types mirroring Pi's RPC surface (kept local to avoid a hard dependency on pi packages). */
 
@@ -77,7 +78,7 @@ export class PiRpcClient {
       : ['--mode', 'rpc', '--no-session']
     this.proc = spawn(piPath, args, {
       cwd: this.cwd,
-      env: process.env,
+      env: { ...process.env, ...dshCredentialEnv() },
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     this.proc.stdout!.setEncoding('utf8')

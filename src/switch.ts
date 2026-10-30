@@ -14,6 +14,8 @@
 
 import { appendFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
+import { resolvePiPath } from './pi-path.ts'
+import { PiRpcClient } from './rpc-client.ts'
 
 /** Diagnostics sink shared with the loop plugin. */
 function trace(line: string): void {
@@ -99,6 +101,28 @@ async function switchEngine(ctx: SwitchContext, enabled: boolean): Promise<Comma
   }
 }
 
+/** Ask a short-lived pi child for its effective model catalog. */
+async function listPiModels(): Promise<CommandResultLike> {
+  const rpc = new PiRpcClient({ cwd: process.cwd(), piPath: resolvePiPath(undefined) })
+  try {
+    const models = await rpc.availableModels()
+    const byProvider = new Map<string, string[]>()
+    for (const model of models) {
+      const ids = byProvider.get(model.provider) ?? []
+      ids.push(model.id)
+      byProvider.set(model.provider, ids)
+    }
+    const text = [...byProvider.entries()]
+      .map(([provider, ids]) => `${provider}: ${ids.join(', ')}`)
+      .join('\n')
+    return { kind: 'success', text: text === '' ? 'pi 当前没有可用模型（检查 ~/.pi/agent/models.json 或 DSH 的 API key）。' : `pi 当前可用的模型：\n${text}` }
+  } catch (error: unknown) {
+    return { kind: 'error', text: `无法读取 pi 模型: ${error instanceof Error ? error.message : String(error)}` }
+  } finally {
+    rpc.close()
+  }
+}
+
 export function apply(ctx: SwitchContext): void {
   ctx.commands.register({
     name: 'pi',
@@ -109,6 +133,11 @@ export function apply(ctx: SwitchContext): void {
     name: 'dsh',
     description: '全局切回 DSH 原生 agent loop（新会话生效）',
     handler: () => switchEngine(ctx, false),
+  })
+  ctx.commands.register({
+    name: 'models',
+    description: '列出 pi 实际可用的模型（DSH 的 API key 已自动带入）',
+    handler: () => listPiModels(),
   })
   ctx.commands.register({
     name: 'engine',

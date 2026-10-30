@@ -57,6 +57,17 @@ interface SessionPersistenceLike {
   open(id: SessionId, access: 'write', options?: { signal?: AbortSignal }): Promise<PersistenceHandleLike>
 }
 
+/**
+ * DSH provider ids whose models pi serves under a different provider name.
+ * DeepSeek's API-key and account adapters both expose the same model ids that
+ * pi's built-in `deepseek` provider does; the account adapter itself (OAuth)
+ * is not shareable, but the forwarded `DEEPSEEK_API_KEY` is.
+ */
+const PROVIDER_ALIASES: Readonly<Record<string, string>> = {
+  'deepseek-official': 'deepseek',
+  'deepseek-account': 'deepseek',
+}
+
 export interface PiFactoryOptions {
   /** Absolute path to the Pi executable (defaults to `pi` on PATH). */
   piPath?: string
@@ -206,6 +217,14 @@ export class PiAgentFactory implements AgentFactory {
       try {
         const available = await rpc.availableModels()
         let known = available.some((entry) => entry.provider === provider && entry.id === modelId)
+        if (!known) {
+          const alias = PROVIDER_ALIASES[provider]
+          if (alias !== undefined && available.some((entry) => entry.provider === alias && entry.id === modelId)) {
+            this.options.logger?.(`[pi:model] provider "${provider}" maps to pi provider "${alias}" for "${modelId}"`)
+            provider = alias
+            known = true
+          }
+        }
         if (!known) {
           const fallback = this.options.modelFallback ?? ''
           const fallbackProvider = fallback.split('/')[0] ?? ''

@@ -78,6 +78,7 @@ state:
 It registers three composer commands, all process-wide:
 
 - `/engine` — report the current loop (`pi` or `DSH native`)
+- `/models` — list the routes pi can actually run (with DSH's keys applied)
 - `/pi` — enable the bundle
 - `/dsh` — disable the bundle
 
@@ -109,6 +110,13 @@ engine's prompt and tool surface. That is not part of the public DSH contract.
   `~/.local/bin`, `~/.npm-global/bin`, `~/.bun/bin`). GUI hosts launch with a
   minimal PATH, so a terminal-only `pi` lookup fails with `spawn pi ENOENT`.
   An explicitly configured path always wins.
+- DSH's provider keys are forwarded to the pi child: the plugin reads the
+  `*_API_KEY` entries of `$DSH_HOME/.credentials.yaml` and adds them to the
+  child's environment, so pi's built-in providers (DeepSeek, …) light up
+  without copying keys into pi's own config. DSH provider ids are aliased to
+  pi's names where the model ids match (`deepseek-official` and
+  `deepseek-account` → `deepseek`); the account route reuses the forwarded
+  API key because the OAuth session itself is not shareable.
 - DSH and pi keep separate model catalogs. At session creation the factory
   checks the DSH-selected `provider/model` route against pi's
   `get_available_models`. When `modelFallback` names a pi-known route (the

@@ -36,6 +36,7 @@ import z from '@deepseek-ai/schemastery'
 import { type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { resolvePiPath } from './pi-path.ts'
+import { dshCredentialEnv } from './dsh-credentials.ts'
 import type {
   ResolvedSubagentStartRequest,
   SubagentCapabilities,
@@ -157,7 +158,7 @@ class PiSubagentProvider implements SubagentProvider {
     return new Promise((resolve, reject) => {
       const child = spawn(this.config.piPath, args, {
         cwd,
-        env: process.env,
+        env: { ...process.env, ...dshCredentialEnv() },
         stdio: ['ignore', 'pipe', 'pipe'],
         signal,
       })
