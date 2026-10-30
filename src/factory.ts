@@ -64,6 +64,8 @@ export interface PiFactoryOptions {
   cwd: string
   /** Pi model route (`provider/model`, e.g. `anthropic/claude-sonnet-4-5`). */
   model?: string
+  /** Pi-known route used when the DSH-selected model is unknown to pi. */
+  modelFallback?: string
   /** Diagnostics sink; omit to keep quiet. */
   logger?: (line: string) => void
   /** Lifecycle trace sink (apply/createAgent/resume); omit to keep quiet. */
@@ -177,8 +179,9 @@ export class PiAgentFactory implements AgentFactory {
     const model = requested?.model !== undefined && requested.model !== ''
       ? `${requested.provider ?? ''}/${requested.model}`.replace(/^\/+/, '')
       : this.options.model ?? ''
-    const provider = model.split('/')[0] ?? ''
-    const modelId = model.split('/').slice(1).join('/')
+    let effectiveModel = model
+    let provider = model.split('/')[0] ?? ''
+    let modelId = model.split('/').slice(1).join('/')
 
     // Rebuild the Pi session from DSH's durable log: the child inherits the
     // complete conversation (DSH-native turns and earlier Pi turns alike), so
@@ -202,13 +205,25 @@ export class PiAgentFactory implements AgentFactory {
     if (model !== '') {
       try {
         const available = await rpc.availableModels()
-        const known = available.some((entry) => entry.provider === provider && entry.id === modelId)
+        let known = available.some((entry) => entry.provider === provider && entry.id === modelId)
         if (!known) {
-          const routes = available.slice(0, 8).map((entry) => `${entry.provider}/${entry.id}`).join(', ')
-          throw new Error(
-            `pi 不认识模型 "${model}"。pi 可用的模型: ${routes === '' ? '(none)' : routes}。`
-            + `请在 DSH 里选择 pi 支持的模型，或把该 provider 加入 pi 的模型配置（~/.pi/agent/models.json）。`,
-          )
+          const fallback = this.options.modelFallback ?? ''
+          const fallbackProvider = fallback.split('/')[0] ?? ''
+          const fallbackId = fallback.split('/').slice(1).join('/')
+          const fallbackKnown = fallback !== ''
+            && available.some((entry) => entry.provider === fallbackProvider && entry.id === fallbackId)
+          if (!fallbackKnown) {
+            const routes = available.slice(0, 8).map((entry) => `${entry.provider}/${entry.id}`).join(', ')
+            throw new Error(
+              `pi 不认识模型 "${model}"。pi 可用的模型: ${routes === '' ? '(none)' : routes}。`
+              + `请在 DSH 里选择 pi 支持的模型、配置 modelFallback，或把该 provider 加入 pi 的模型配置（~/.pi/agent/models.json）。`,
+            )
+          }
+          this.options.logger?.(`[pi:model] DSH model "${model}" is unknown to pi; using fallback "${fallback}"`)
+          effectiveModel = fallback
+          provider = fallbackProvider
+          modelId = fallbackId
+          known = true
         }
         await rpc.setModel(provider, modelId)
       } catch (error: unknown) {

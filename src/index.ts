@@ -58,6 +58,12 @@ export interface Config {
   cwd?: string
   /** Pi model route (`provider/model`, e.g. `anthropic/claude-sonnet-4-5`). */
   model?: string
+  /**
+   * Fallback route used when the DSH-selected model is unknown to pi (DSH and
+   * pi keep separate catalogs). Must itself be a pi-known route; empty means
+   * fail at session creation with pi's available routes.
+   */
+  modelFallback?: string
   /** Protocol diagnostics; written to /tmp/dsh-pi-agent.log. */
   debug?: boolean
 }
@@ -66,6 +72,7 @@ export const Config = z.object({
   piPath: z.string(),
   cwd: z.string(),
   model: z.string(),
+  modelFallback: z.string(),
   debug: z.boolean(),
 }) as unknown as z<Config>
 
@@ -81,7 +88,7 @@ export function apply(ctx: Context, config: Config): void {
     const logger = (line: string): void => {
       trace(`[pi] ${line}`)
     }
-    const factory = new PiAgentFactory({ piPath: config.piPath, cwd, model: config.model, logger, trace }, ctx)
+    const factory = new PiAgentFactory({ piPath: config.piPath, cwd, model: config.model, modelFallback: config.modelFallback, logger, trace }, ctx)
     ctx.agents.setFactory(factory)
     trace('factory registered (pi loop active)')
   } catch (error: unknown) {

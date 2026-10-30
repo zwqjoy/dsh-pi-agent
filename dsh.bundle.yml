@@ -13,4 +13,8 @@
       name: 'dsh-pi-agent'
       config:
         piPath: 'pi'
+        # DSH and pi keep separate model catalogs. When the DSH-selected route
+        # is DSH-only (account providers, workbuddy, …), pi falls back to this
+        # route instead of failing session creation.
+        modelFallback: 'newapi/GLM-5.3-Flash'
         debug: true

@@ -12,7 +12,13 @@
  * change applied live or needs a restart.
  */
 
+import { appendFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
+
+/** Diagnostics sink shared with the loop plugin. */
+function trace(line: string): void {
+  try { appendFileSync('/tmp/dsh-pi-agent.log', `${new Date().toISOString()} [switch] ${line}\n`) } catch { /* diagnostics must never break the command */ }
+}
 
 interface CommandResultLike {
   kind: 'success' | 'error'
@@ -61,35 +67,32 @@ async function piEnabled(ctx: SwitchContext): Promise<boolean | undefined> {
   return bundles.find((bundle) => bundle.name === BUNDLE)?.enabled
 }
 
-/** Flip the bundle and translate the manager's outcome into one line. */
+/**
+ * Flip the bundle AFTER the command result has been delivered.
+ *
+ * The switch disposes the agent loop that is currently carrying this very
+ * command. Awaiting it inside the handler loses the command's `done` event
+ * with that loop, and the composer stays on "executing" forever. Returning
+ * first and flipping on a timer lets the command turn settle, then the
+ * activation runs; its outcome is written to the plugin's diagnostics log.
+ */
 async function switchEngine(ctx: SwitchContext, enabled: boolean): Promise<CommandResultLike> {
   try {
     const current = await piEnabled(ctx)
     if (current === enabled) {
       return { kind: 'success', text: enabled ? '当前已经是 pi agent loop。' : '当前已经是 DSH 原生 agent loop。' }
     }
-    const result = await ctx.pluginManager.setBundleEnabled(BUNDLE, enabled)
-    switch (result.application) {
-      case 'applied':
-        return {
-          kind: 'success',
-          text: enabled
-            ? '已切换到 pi agent loop：新会话立即生效；当前会话仍绑定旧引擎，请新建会话或重新打开后继续。'
-            : '已切回 DSH 原生 agent loop：新会话立即生效；当前会话仍绑定 pi，请新建会话或重新打开后继续。',
-        }
-      case 'restart-required':
-        return {
-          kind: 'success',
-          text: enabled
-            ? '已启用 pi agent loop，重启 App 后生效；当前会话请先勿继续发送。'
-            : '已关闭 pi agent loop，重启 App 后恢复原生 loop；当前会话请先勿继续发送。',
-        }
-      case 'overridden':
-        return { kind: 'error', text: '设置已保存，但被更高优先级的补丁层覆盖。' }
-      case 'cancelled':
-        return { kind: 'error', text: '切换被取消。' }
-      case 'failed':
-        return { kind: 'error', text: `切换失败: ${result.error?.message ?? 'unknown error'}` }
+    setTimeout(() => {
+      void ctx.pluginManager.setBundleEnabled(BUNDLE, enabled).then(
+        (result) => trace(`switch pi=${String(enabled)} application=${result.application}`),
+        (error: unknown) => trace(`switch pi=${String(enabled)} FAILED: ${String(error)}`),
+      )
+    }, 1200)
+    return {
+      kind: 'success',
+      text: enabled
+        ? '正在切换到 pi agent loop…新会话生效；请先在模型选择里选 pi 支持的模型（如 newapi/…），并新建会话。'
+        : '正在切回 DSH 原生 agent loop…新会话生效；当前会话请新建或重新打开后继续。',
     }
   } catch (error: unknown) {
     return { kind: 'error', text: `切换失败: ${error instanceof Error ? error.message : String(error)}` }

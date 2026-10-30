@@ -111,8 +111,11 @@ engine's prompt and tool surface. That is not part of the public DSH contract.
   An explicitly configured path always wins.
 - DSH and pi keep separate model catalogs. At session creation the factory
   checks the DSH-selected `provider/model` route against pi's
-  `get_available_models` and fails with the routes pi can run instead of
-  letting an unknown route die mid-turn inside pi. Add the provider to
+  `get_available_models`. When `modelFallback` names a pi-known route (the
+  shipped bundle uses `newapi/GLM-5.3-Flash`), an unknown DSH-only route
+  falls back to it and the session still runs; without a usable fallback the
+  factory fails with the routes pi can run instead of letting an unknown
+  route die mid-turn inside pi. Add the provider to
   `~/.pi/agent/models.json` or select a pi-known model in DSH.
 
 ## Verified
