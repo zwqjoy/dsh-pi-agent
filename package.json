@@ -1,6 +1,6 @@
 {
   "name": "dsh-pi-agent",
-  "version": "0.2.0-dsh12",
+  "version": "0.2.0-dsh13",
   "description": "Use the Pi coding agent (@earendil-works/pi-coding-agent) as the agent loop inside DeepSeek Harness (@deepseek-ai/dsh): drive pi --mode rpc from the official DSH web UI, swap subagents to pi, zero prompt injection.",
   "type": "module",
   "main": "dist/index.js",

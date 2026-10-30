@@ -16,6 +16,7 @@ import { appendFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { resolvePiPath } from './pi-path.ts'
 import { PiRpcClient } from './rpc-client.ts'
+import { syncDshSkills } from './skills.ts'
 
 /** Diagnostics sink shared with the loop plugin. */
 function trace(line: string): void {
@@ -138,6 +139,22 @@ export function apply(ctx: SwitchContext): void {
     name: 'models',
     description: '列出 pi 实际可用的模型（DSH 的 API key 已自动带入）',
     handler: () => listPiModels(),
+  })
+  ctx.commands.register({
+    name: 'skills',
+    description: '把 DSH 已安装的技能同步给 pi（软链到 ~/.pi/agent/skills）',
+    handler: () => {
+      const result = syncDshSkills((line) => trace(line))
+      const parts: string[] = []
+      if (result.linked.length > 0) parts.push(`新同步: ${result.linked.join(', ')}`)
+      if (result.skipped.length > 0) parts.push(`已存在: ${result.skipped.join(', ')}`)
+      return {
+        kind: 'success',
+        text: parts.length === 0
+          ? '没有找到可同步的 DSH 技能。'
+          : `DSH 技能已同步到 pi（新会话生效）。${parts.join('；')}`,
+      }
+    },
   })
   ctx.commands.register({
     name: 'engine',

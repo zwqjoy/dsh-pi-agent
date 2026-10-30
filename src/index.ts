@@ -31,6 +31,7 @@ import { appendFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { PiAgentFactory } from './factory.ts'
+import { syncDshSkills } from './skills.ts'
 
 export { buildPiSessionFile } from './history.ts'
 export type {
@@ -88,6 +89,10 @@ export function apply(ctx: Context, config: Config): void {
     const logger = (line: string): void => {
       trace(`[pi] ${line}`)
     }
+    // Skills are files on disk: link DSH's installed skill directories into
+    // pi's discovery root before any child starts.
+    const skills = syncDshSkills(logger)
+    trace(`[skills] linked=${skills.linked.length} skipped=${skills.skipped.length}`)
     const factory = new PiAgentFactory({ piPath: config.piPath, cwd, model: config.model, modelFallback: config.modelFallback, logger, trace }, ctx)
     ctx.agents.setFactory(factory)
     trace('factory registered (pi loop active)')
