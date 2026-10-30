@@ -116,6 +116,7 @@ export class PiAgent implements Agent {
   private firstAssistant = true
   private aborted = false
   private settleResolvers: (() => void)[] = []
+  private piError: Error | null = null
   private attemptCounter = 0
   private attempt: StreamAttempt | null = null
   private stream = new AssistantStreamAccumulator()
@@ -225,6 +226,7 @@ export class PiAgent implements Agent {
     this.step = 0
     this.firstAssistant = true
     this.aborted = false
+    this.piError = null
     const turn = this.turn
     let endReason: TurnEndReason = { kind: 'completed' }
     try {
@@ -239,6 +241,13 @@ export class PiAgent implements Agent {
       await this.rpc.prompt(promptText)
       // Wait until Pi reports the run settled.
       await this.waitSettled()
+      // A model/transport failure settles with an empty assistant message;
+      // surface it as the turn's failure instead of a silent "completed".
+      if (this.piError !== null) {
+        const failure = this.piError
+        this.piError = null
+        throw failure
+      }
     } catch (error: unknown) {
       endReason = this.aborted
         ? { kind: 'aborted', reason: { kind: 'user' } }
@@ -351,12 +360,17 @@ export class PiAgent implements Agent {
       }
       case 'message_end': {
         const message = event.message as
-          | { role?: string; content?: unknown; provider?: string; model?: string; stopReason?: string }
+          | { role?: string; content?: unknown; provider?: string; model?: string; stopReason?: string; errorMessage?: string }
           | undefined
         if (message?.role !== 'assistant') return
         const content = Array.isArray(message.content) ? message.content : []
         const blocks = content.map(convertBlock).filter((block): block is ContentBlock => block !== undefined)
-        if (blocks.length === 0) return
+        if (blocks.length === 0) {
+          if (message.stopReason === 'error') {
+            this.piError = new Error(String(message.errorMessage ?? 'pi model request failed'))
+          }
+          return
+        }
         const sourceProvider = typeof message.provider === 'string' ? message.provider : this.options.provider ?? ''
         const sourceModel = typeof message.model === 'string' ? message.model : this.options.model ?? ''
         this.currentProvider = sourceProvider

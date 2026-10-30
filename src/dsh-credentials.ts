@@ -32,8 +32,12 @@ export function dshCredentialEnv(): Record<string, string> {
       if (match === null) continue
       const [, name, rawValue] = match
       if (!/_API_KEY$/.test(name)) continue
-      let value = rawValue.trim()
-      if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+      // The store is emitted as flow-style YAML: each entry carries a trailing
+      // comma that is a separator, not part of the value. YAML parsers drop it;
+      // this line reader must too, or the forwarded key is rejected (401).
+      let value = rawValue.trim().replace(/,\s*$/, '')
+      if (value.length >= 2
+        && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
         value = value.slice(1, -1)
       }
       if (value !== '') env[name] = value
