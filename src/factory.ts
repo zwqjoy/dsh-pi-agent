@@ -261,6 +261,7 @@ export class PiAgentFactory implements AgentFactory {
       },
       rpc,
       cwd,
+      logger: this.options.logger,
     })
 
     // Creation-window composition (the AgentFactory contract): await the

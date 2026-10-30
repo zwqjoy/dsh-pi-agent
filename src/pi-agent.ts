@@ -48,6 +48,8 @@ export interface PiAgentOptions {
   rpc: PiRpcClient
   /** Working directory reported on the session header. */
   cwd: string
+  /** Diagnostics sink (protocol + turn failures). */
+  logger?: (line: string) => void
 }
 
 /** Map a Pi assistant content block to a DSH content block. */
@@ -101,6 +103,7 @@ export class PiAgent implements Agent {
   readonly ctx: Context
 
   private readonly rpc: PiRpcClient
+  private readonly logger?: (line: string) => void
   private readonly cwd: string
   private readonly scope: Scope
   private readonly dispatch: AgentEventDispatch
@@ -126,6 +129,7 @@ export class PiAgent implements Agent {
 
   constructor(options: PiAgentOptions) {
     this.rpc = options.rpc
+    this.logger = options.logger
     this.cwd = options.cwd
     this.id = options.session.id
     this.options = options.agentOptions
@@ -249,6 +253,7 @@ export class PiAgent implements Agent {
         throw failure
       }
     } catch (error: unknown) {
+      this.logger?.(`[turn] failed: ${error instanceof Error ? error.message : String(error)}`)
       endReason = this.aborted
         ? { kind: 'aborted', reason: { kind: 'user' } }
         : { kind: 'error', error: { message: String(error), code: 'UNKNOWN' } }
