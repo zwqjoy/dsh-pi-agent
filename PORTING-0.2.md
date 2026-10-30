@@ -63,6 +63,37 @@ rows copied into `cordis.patch.yml`:
 The DSH-selected model route must exist in pi's own provider config
 (`~/.pi/agent/models.json`); otherwise pi's `set_model` fails.
 
+## Switching engines at runtime
+
+The package also exports an always-on `dsh-pi-agent/switch` plugin. Mount it
+from the profile's own patch layer (NOT from the bundle) so it survives either
+state:
+
+```yaml
+- insert:
+    - id: pi-switch
+      name: 'dsh-pi-agent/switch'
+```
+
+It registers three composer commands, all process-wide:
+
+- `/engine` — report the current loop (`pi` or `DSH native`)
+- `/pi` — enable the bundle
+- `/dsh` — disable the bundle
+
+The flip goes through the host plugin manager (`setBundleEnabled`), the same
+route the Plugins page uses. On hosts with the config-watching HMR service
+(the desktop app ships a fallback) the change applies live and new sessions
+use the selected loop; otherwise the command reports that a restart is needed.
+
+DSH 0.2 has exactly one `AgentFactory` slot (`ctx.agents.setFactory` throws on
+a second registration), so the engine is a process-wide choice. Per-session
+routing would require a router factory that captures the native loop's own
+factory through internal APIs, plus a durable per-session engine marker and a
+pre-conversation UI control; the choice would still have to be frozen when the
+conversation starts, because each turn's history was produced under that
+engine's prompt and tool surface. That is not part of the public DSH contract.
+
 ## Host integration notes
 
 - The plugin declares the same dependency surface as the stock `AgentLoop`
