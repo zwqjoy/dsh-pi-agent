@@ -42,7 +42,14 @@ export type {
 
 export const name = 'pi-agent'
 
-export const inject = ['sessions', 'agents']
+// Mirror the stock AgentLoop's dependency surface. Agent scopes inherit this
+// context's API, and DSH's gateway/preset setup callbacks are written against
+// the loop's contract: they compose prompt sections and tools through
+// `systemPrompt` / `tools` / `sessionProjections` / `llm`. Declaring only
+// `sessions` and `agents` makes those callbacks throw
+// "cannot get property \"systemPrompt\" without inject" while creating a
+// session.
+export const inject = ['agents', 'sessions', 'llm', 'tools', 'systemPrompt', 'sessionProjections']
 
 export interface Config {
   /** Pi executable; defaults to `pi` on PATH. */

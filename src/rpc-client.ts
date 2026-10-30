@@ -11,6 +11,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { resolve } from 'node:path'
+import { resolvePiPath } from './pi-path.ts'
 
 /** Minimal structural types mirroring Pi's RPC surface (kept local to avoid a hard dependency on pi packages). */
 
@@ -68,7 +69,7 @@ export class PiRpcClient {
   constructor(options: PiRpcClientOptions) {
     this.cwd = resolve(options.cwd)
     this.logger = options.logger
-    const piPath = options.piPath ?? 'pi'
+    const piPath = resolvePiPath(options.piPath)
     // A session file carries the pre-handoff history; without one the child
     // runs ephemeral (current default behavior).
     const args = options.sessionFile !== undefined

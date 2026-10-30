@@ -35,6 +35,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { resolvePiPath } from './pi-path.ts'
 import type {
   ResolvedSubagentStartRequest,
   SubagentCapabilities,
@@ -195,7 +196,7 @@ export function apply(ctx: Context, config: Config): void {
   }
   const provider = new PiSubagentProvider(providerName, ctx, {
     ...config,
-    piPath: config.piPath === undefined || config.piPath === '' ? 'pi' : config.piPath,
+    piPath: resolvePiPath(config.piPath),
     timeoutMs,
   })
   ctx.subagents.registerProvider(provider)

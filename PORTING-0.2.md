@@ -63,6 +63,20 @@ rows copied into `cordis.patch.yml`:
 The DSH-selected model route must exist in pi's own provider config
 (`~/.pi/agent/models.json`); otherwise pi's `set_model` fails.
 
+## Host integration notes
+
+- The plugin declares the same dependency surface as the stock `AgentLoop`
+  (`agents`, `sessions`, `llm`, `tools`, `systemPrompt`, `sessionProjections`).
+  Agent scopes inherit that API, and DSH's gateway / agent-preset setup
+  callbacks compose prompt sections and tools through those services; declaring
+  only `sessions`/`agents` makes every new session fail with
+  `cannot get property "systemPrompt" without inject`.
+- `piPath` defaults to the bare name `pi`, which is first resolved against the
+  common absolute install locations (`/opt/homebrew/bin`, `/usr/local/bin`,
+  `~/.local/bin`, `~/.npm-global/bin`, `~/.bun/bin`). GUI hosts launch with a
+  minimal PATH, so a terminal-only `pi` lookup fails with `spawn pi ENOENT`.
+  An explicitly configured path always wins.
+
 ## Verified
 
 - DSH `0.2.0-rc.2` CLI — headless session and the Web UI (session completed,
@@ -72,6 +86,10 @@ The DSH-selected model route must exist in pi's own provider config
 - Bundle toggle semantics: with `dsh-pi-agent` in `dsh.profile.bundles` the
   composed config disables `agent-loop` and inserts `pi-agent`; removing the
   bundle name restores the native `agent-loop` and drops `pi-agent`.
+- Desktop-style preset wiring (`agent-preset-registry` default `standard`,
+  which is what the app's gateway requests): session creation and a full turn
+  complete after the dependency-surface fix, including a preset-composed
+  session (`PRESET_PI_OK`).
 
 ## Known limitations
 
