@@ -191,11 +191,31 @@ export class PiAgentFactory implements AgentFactory {
     })
     const rpc = new PiRpcClient({
       cwd,
-      model: model === '' ? undefined : model,
       piPath: this.options.piPath,
       sessionFile,
       logger: this.options.logger,
     })
+    // Validate the DSH-selected route against pi's own model catalog before
+    // publishing. DSH and pi keep separate catalogs; an unknown route used to
+    // fail deep inside pi with an opaque error (and hid the real cause from
+    // the session error). Fail at creation with the routes pi can actually run.
+    if (model !== '') {
+      try {
+        const available = await rpc.availableModels()
+        const known = available.some((entry) => entry.provider === provider && entry.id === modelId)
+        if (!known) {
+          const routes = available.slice(0, 8).map((entry) => `${entry.provider}/${entry.id}`).join(', ')
+          throw new Error(
+            `pi 不认识模型 "${model}"。pi 可用的模型: ${routes === '' ? '(none)' : routes}。`
+            + `请在 DSH 里选择 pi 支持的模型，或把该 provider 加入 pi 的模型配置（~/.pi/agent/models.json）。`,
+          )
+        }
+        await rpc.setModel(provider, modelId)
+      } catch (error: unknown) {
+        rpc.close()
+        throw error
+      }
+    }
     const agent = new PiAgent({
       ctx: this.registryCtx,
       session,

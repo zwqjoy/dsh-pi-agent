@@ -74,15 +74,15 @@ async function switchEngine(ctx: SwitchContext, enabled: boolean): Promise<Comma
         return {
           kind: 'success',
           text: enabled
-            ? '已切换到 pi agent loop，新会话立即生效。'
-            : '已切回 DSH 原生 agent loop，新会话立即生效。',
+            ? '已切换到 pi agent loop：新会话立即生效；当前会话仍绑定旧引擎，请新建会话或重新打开后继续。'
+            : '已切回 DSH 原生 agent loop：新会话立即生效；当前会话仍绑定 pi，请新建会话或重新打开后继续。',
         }
       case 'restart-required':
         return {
           kind: 'success',
           text: enabled
-            ? '已启用 pi agent loop，重启 App 后生效。'
-            : '已关闭 pi agent loop，重启 App 后恢复原生 loop。',
+            ? '已启用 pi agent loop，重启 App 后生效；当前会话请先勿继续发送。'
+            : '已关闭 pi agent loop，重启 App 后恢复原生 loop；当前会话请先勿继续发送。',
         }
       case 'overridden':
         return { kind: 'error', text: '设置已保存，但被更高优先级的补丁层覆盖。' }

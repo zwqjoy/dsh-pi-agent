@@ -98,13 +98,22 @@ export class PiRpcClient {
         if (!this.closed) this.proc.kill('SIGTERM')
       }, { once: true })
     }
-    if (options.model) {
-      void this.send({ type: 'set_model', provider: options.model.split('/')[0], modelId: options.model.split('/').slice(1).join('/') })
-        // Teardown can kill the child before this command's response arrives;
-        // without a handler the rejection becomes an unhandled rejection that
-        // crashes the host process.
-        .catch(() => undefined)
-    }
+  }
+
+  /** One available model route as pi reports it. */
+  async availableModels(): Promise<Array<{ provider: string; id: string }>> {
+    const response = await this.send({ type: 'get_available_models' })
+    if (!response.success) throw new Error(`pi get_available_models failed: ${response.error ?? 'unknown error'}`)
+    const data = response.data as { models?: Array<{ provider?: unknown; id?: unknown }> } | undefined
+    return (data?.models ?? [])
+      .filter((model) => typeof model.provider === 'string' && typeof model.id === 'string')
+      .map((model) => ({ provider: model.provider as string, id: model.id as string }))
+  }
+
+  /** Select one provider/model route on the running child. */
+  async setModel(provider: string, modelId: string): Promise<void> {
+    const response = await this.send({ type: 'set_model', provider, modelId })
+    if (!response.success) throw new Error(`pi set_model failed: ${response.error ?? 'unknown error'}`)
   }
 
   private onData(chunk: string): void {

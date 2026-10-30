@@ -85,6 +85,8 @@ The flip goes through the host plugin manager (`setBundleEnabled`), the same
 route the Plugins page uses. On hosts with the config-watching HMR service
 (the desktop app ships a fallback) the change applies live and new sessions
 use the selected loop; otherwise the command reports that a restart is needed.
+A conversation that was already open stays bound to the engine it started
+under: create a new session (or reopen the old one) after switching.
 
 DSH 0.2 has exactly one `AgentFactory` slot (`ctx.agents.setFactory` throws on
 a second registration), so the engine is a process-wide choice. Per-session
@@ -107,6 +109,11 @@ engine's prompt and tool surface. That is not part of the public DSH contract.
   `~/.local/bin`, `~/.npm-global/bin`, `~/.bun/bin`). GUI hosts launch with a
   minimal PATH, so a terminal-only `pi` lookup fails with `spawn pi ENOENT`.
   An explicitly configured path always wins.
+- DSH and pi keep separate model catalogs. At session creation the factory
+  checks the DSH-selected `provider/model` route against pi's
+  `get_available_models` and fails with the routes pi can run instead of
+  letting an unknown route die mid-turn inside pi. Add the provider to
+  `~/.pi/agent/models.json` or select a pi-known model in DSH.
 
 ## Verified
 
