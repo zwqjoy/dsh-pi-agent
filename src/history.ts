@@ -181,15 +181,14 @@ function toPiToolResultMessage(
   logger?: (line: string) => void,
 ): PiMessage {
   const message = event.data.message as ToolResultMessage
-  const block = message.content[0]
-  const callId = String(block?.toolCallId ?? '')
-  const content = convertBlocks(block?.content ?? [], logger)
+  const callId = String(message.toolCallId)
+  const content = convertBlocks(message.content, logger)
   return {
     role: 'toolResult',
     content,
     toolCallId: callId,
     toolName: toolNames.get(callId) ?? 'unknown',
-    isError: block?.isError === true,
+    isError: message.isError === true,
   }
 }
 
@@ -211,7 +210,7 @@ export function buildPiSessionFile(options: BuildPiSessionFileOptions): string {
   const entries: PiMessageEntry[] = []
   let parentId: string | null = null
 
-  for (const event of session.events) {
+  for (const event of session.snapshotEvents()) {
     switch (event.type) {
       case 'turn/end': {
         const reason = event.data.reason

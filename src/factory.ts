@@ -4,11 +4,11 @@
  *
  * When this plugin is loaded, every new session the frontend creates is
  * driven by a Pi child process (`pi --mode rpc`) instead of DSH's own
- * `dsh-agent-loop`. The factory mints the session, the scoped PiAgent, and
- * the Pi RPC child, then publishes both through the same ordered boundary the
- * default loop uses (`session/created`, `agent/created`,
- * `agent/session-start`), so DSH's frontend, hooks, and session log work
- * unchanged.
+ * `dsh-agent-loop`. The factory prepares the session, builds the scoped
+ * PiAgent and the RPC child, takes persistence write ownership, and then
+ * publishes both through the same ordered boundary the default loop uses
+ * (`session/created`, `agent/created`, `agent/session-start`), so DSH's
+ * frontend, hooks, and session log work unchanged.
  *
  * To fall back to DSH's own loop, disable this plugin's entry (or the
  * profile patch inserting it) — the default `agent-loop` factory remains
@@ -16,21 +16,46 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  emitAgentEvent,
-  type AgentFactory,
-  type AgentHandle,
-  type AgentOptions,
-  type CreateAgentOptions,
-  type ResumeAgentOptions,
+import type {
+  AgentFactory,
+  AgentHandle,
+  AgentOptions,
+  CreateAgentOptions,
+  ResumeAgentOptions,
 } from '@deepseek-ai/dsh-agent'
-import { createScope, scopeOf, type ScopeKey } from '@deepseek-ai/dsh-scope'
-import type { Session, SessionId } from '@deepseek-ai/dsh-session'
+import {
+  SessionLogOffset,
+  type Session,
+  type SessionEvent,
+  type SessionHeader,
+  type SessionId,
+} from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { buildPiSessionFile } from './history.ts'
 import { PiAgent } from './pi-agent.ts'
 import { PiRpcClient } from './rpc-client.ts'
+
+/**
+ * Minimal structural view of the persistence service and its write handle.
+ * Kept local so the plugin does not need a hard type dependency on the
+ * backend package; both members are stable public contracts.
+ */
+interface PersistenceHandleLike {
+  readonly header: SessionHeader
+  readonly inheritedEventCount: SessionLogOffset
+  read(offset?: number, length?: number, options?: { signal?: AbortSignal }): Promise<{
+    readonly events: readonly SessionEvent[]
+    readonly eventState: 'detached' | 'shared-frozen'
+  }>
+  append(events: readonly SessionEvent[], options?: { signal?: AbortSignal }): Promise<void>
+  close(): Promise<void>
+}
+
+interface SessionPersistenceLike {
+  create(header: SessionHeader, options?: { inheritedEventCount?: SessionLogOffset; signal?: AbortSignal }): Promise<PersistenceHandleLike>
+  open(id: SessionId, access: 'write', options?: { signal?: AbortSignal }): Promise<PersistenceHandleLike>
+}
 
 export interface PiFactoryOptions {
   /** Absolute path to the Pi executable (defaults to `pi` on PATH). */
@@ -55,18 +80,38 @@ export class PiAgentFactory implements AgentFactory {
     this.registryCtx = registryCtx
   }
 
+  private persistence(): SessionPersistenceLike | undefined {
+    return this.registryCtx.get('sessionPersistence') as SessionPersistenceLike | undefined
+  }
+
   async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {
     const id = options.sessionId
     this.options.trace?.(`createAgent id=${String(id)} meta=${JSON.stringify(options.meta)}`)
     const cwd = options.meta?.cwd ?? this.options.cwd
     try {
       const session = this.registryCtx.sessions.prepare(id, {
-        ...options.meta === undefined ? {} : { meta: options.meta },
         ...options.seed === undefined ? {} : { seed: options.seed },
+        ...options.meta === undefined ? {} : { meta: options.meta },
+        ...options.inheritedEventCount === undefined ? {} : { inheritedEventCount: options.inheritedEventCount },
       })
-        const handle = await this.assembleAndPublish(ownerCtx, id, session, cwd, options.agentOptions, options.signal, options.setup)
+      const persistence = this.persistence()
+      let handle: PersistenceHandleLike | undefined
+      try {
+        handle = persistence === undefined
+          ? undefined
+          : await persistence.create(session.header, {
+              inheritedEventCount: session.inheritedEventCount,
+              ...options.signal === undefined ? {} : { signal: options.signal },
+            })
+      } catch (error: unknown) {
+        await handle?.close().catch(() => undefined)
+        throw error
+      }
+      const handleFinal = await this.assembleAndPublish(
+        ownerCtx, id, session, cwd, options.agentOptions, options.signal, options.setup, 'startup', options.parentAgent, handle, 0,
+      )
       this.options.trace?.(`createAgent OK id=${String(id)}`)
-      return handle
+      return handleFinal
     } catch (error: unknown) {
       this.options.trace?.(`createAgent FAILED id=${String(id)}: ${String(error)}`)
       throw error
@@ -74,24 +119,34 @@ export class PiAgentFactory implements AgentFactory {
   }
 
   async resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle> {
-    const persistence = this.registryCtx.get('sessionPersistence')
+    const persistence = this.persistence()
     if (persistence === undefined) {
       throw new Error('cannot resume: session persistence is not configured (load a dsh-session-persistence backend)')
     }
     const id = options.resumeSessionId
     this.options.trace?.(`resume id=${String(id)}`)
+    let handle: PersistenceHandleLike | undefined
     try {
-      const preparation = await persistence.prepare(id)
-      try {
-        const session = preparation.session
-        const cwd = session.header.cwd ?? this.options.cwd
-      const handle = await this.assembleAndPublish(ownerCtx, id, session, cwd, options.agentOptions, options.signal, options.setup)
-        this.options.trace?.(`resume OK id=${String(id)}`)
-        return handle
-      } finally {
-        preparation[Symbol.dispose]()
-      }
+      handle = await persistence.open(id, 'write', {
+        ...options.signal === undefined ? {} : { signal: options.signal },
+      })
+      const stored = await handle.read(0, undefined, {
+        ...options.signal === undefined ? {} : { signal: options.signal },
+      })
+      const session = this.registryCtx.sessions.prepare(id, {
+        seed: [...stored.events],
+        meta: structuredClone(handle.header),
+        inheritedEventCount: handle.inheritedEventCount,
+        eventState: stored.eventState,
+      })
+      const cwd = session.header.cwd ?? this.options.cwd
+      const published = await this.assembleAndPublish(
+        ownerCtx, id, session, cwd, options.agentOptions, options.signal, options.setup, 'resume', options.parentAgent, handle, stored.events.length,
+      )
+      this.options.trace?.(`resume OK id=${String(id)}`)
+      return published
     } catch (error: unknown) {
+      await handle?.close().catch(() => undefined)
       this.options.trace?.(`resume FAILED id=${String(id)}: ${String(error)}`)
       throw error
     }
@@ -106,11 +161,14 @@ export class PiAgentFactory implements AgentFactory {
     agentOptions: AgentOptions | undefined,
     signal: AbortSignal | undefined,
     setup: CreateAgentOptions['setup'],
+    source: 'startup' | 'resume',
+    parentAgent: CreateAgentOptions['parentAgent'],
+    handle: PersistenceHandleLike | undefined,
+    storedCount: number,
   ): Promise<AgentHandle> {
     ownerCtx.fiber.assertActive()
     if (signal?.aborted) throw new Error(`agent "${id}" creation aborted`)
 
-    this.options.trace?.(`dsh-scope resolved at: ${import.meta.resolve('@deepseek-ai/dsh-scope')}`)
     // The requested per-agent model route wins over the factory default. This
     // is what lets a delegated child (whose `agentOptions` come from
     // tool-subagent's config) run on a fixed model like `provider/model`
@@ -122,7 +180,6 @@ export class PiAgentFactory implements AgentFactory {
     const provider = model.split('/')[0] ?? ''
     const modelId = model.split('/').slice(1).join('/')
 
-    const scope = createScope(this.registryCtx, id as unknown as ScopeKey)
     // Rebuild the Pi session from DSH's durable log: the child inherits the
     // complete conversation (DSH-native turns and earlier Pi turns alike), so
     // a session handed off mid-stream continues with full context.
@@ -155,12 +212,11 @@ export class PiAgentFactory implements AgentFactory {
     // Creation-window composition (the AgentFactory contract): await the
     // caller's setup on the agent's scoped context, invoke its synchronous
     // commit if any, and only then insert/announce — so no observer can see a
-    // partially configured child world. Setup composes, it never drives. It
-    // runs inside the try below so a rejection rolls the child back through
-    // the same dispose path (agent, rpc child, scope).
+    // partially configured child world. Setup composes, it never drives.
     let detachSession: (() => void) | undefined
     let detachAgent: (() => void) | undefined
     let disposing: Promise<void> | undefined
+    let stored = storedCount
     const dispose = (): Promise<void> => (disposing ??= (async () => {
       try {
         agent.dispose()
@@ -170,7 +226,7 @@ export class PiAgentFactory implements AgentFactory {
           detachAgent?.()
           detachSession?.()
         } finally {
-          // PiAgent.dispose() already unwinds its own scope.
+          await handle?.close().catch(() => undefined)
         }
       }
     })())
@@ -182,18 +238,25 @@ export class PiAgentFactory implements AgentFactory {
     try {
       if (setup !== undefined) {
         try {
-          const setupCommit = await setup(agent.ctx)
+          const setupCommit = await setup(agent.ctx, agent)
           setupCommit?.commit()
         } catch (error: unknown) {
           this.options.trace?.(`setup FAILED id=${String(id)}: ${String(error)}`)
           throw error
         }
       }
+      // Pre-publication appends (constructor seed markers, setup-window
+      // events) never re-emit on `session/event`, so store them before live
+      // events start routing into the handle.
+      if (handle !== undefined) {
+        const suffix = session.snapshotEvents(SessionLogOffset(stored))
+        if (suffix.length > 0) await handle.append(suffix)
+        stored = session.snapshotEvents().length
+      }
       detachSession = agent.ctx.sessions.enter(session)
-      detachAgent = this.registryCtx.agents.enter(agent, ownerCtx.agent)
+      detachAgent = this.registryCtx.agents.enter(agent, parentAgent)
       agent.ctx.sessions.announce(session)
-      this.registryCtx.agents.announce(agent)
-      emitAgentEvent(this.registryCtx, agent, 'agent/session-start', { source: 'startup' })
+      await this.registryCtx.agents.announce(agent, source, signal)
       return { agent, dispose: () => dispose().then(() => undefined) }
     } catch (error: unknown) {
       unfollowOwner?.()

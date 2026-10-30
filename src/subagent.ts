@@ -92,7 +92,7 @@ function resolveCwd(configured: string | undefined, request: ResolvedSubagentSta
 }
 
 class PiSubagentProvider implements SubagentProvider {
-  readonly capabilities: SubagentCapabilities = { outputSchema: false, depthLimit: false, toolFilter: false, persona: false }
+  readonly capabilities: SubagentCapabilities = { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false }
   // The child is a fresh pi process: no parent conversation crosses the boundary.
   readonly inheritsParentContext = false
 

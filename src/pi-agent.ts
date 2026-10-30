@@ -5,24 +5,27 @@
  * DSH's frontend, session log, and hooks program against the `Agent`
  * interface (`@deepseek-ai/dsh-agent`); this class satisfies that contract and
  * translates Pi's RPC event stream into DSH's durable session events
- * (`turn/*`, `step/*`, `user/message`, `assistant/chunk`,
- * `assistant/message`, `tool/call`, `tool/result`).
+ * (`turn/*`, `step/*`, `user/message`, `assistant/message`, `tool/call`,
+ * `tool/result`) plus live `agent/assistant-stream` frames.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { createScope, type Scope, type ScopeKey } from '@deepseek-ai/dsh-scope'
+import { createScope, type Scope } from '@deepseek-ai/dsh-scope'
 import {
   agentEvents,
-  Inbox,
   type Agent,
+  type AgentEventDispatch,
   type AgentOptions,
   type AgentStatus,
 } from '@deepseek-ai/dsh-agent'
 import {
+  AssistantStreamAccumulator,
+  LlmAttemptId,
+  ToolCallId,
   createAssistantMessage,
   createToolResultMessage,
-  CallId,
   type AssistantMessage,
+  type AssistantStreamRecord,
   type ContentBlock,
   type StreamChunk,
   type UserMessage,
@@ -31,8 +34,10 @@ import type {
   AgentCancelCause,
   Session,
   SessionId,
+  SessionSeq,
   TurnEndReason,
 } from '@deepseek-ai/dsh-session'
+import { PiInbox } from './inbox.ts'
 import { PiRpcClient, type PiEvent } from './rpc-client.ts'
 
 export interface PiAgentOptions {
@@ -63,7 +68,7 @@ function convertBlock(block: unknown): ContentBlock | undefined {
       const args = tool.arguments
       return {
         type: 'tool-call',
-        id: CallId(String(tool.id ?? '')),
+        id: ToolCallId(String(tool.id ?? '')),
         name: String(tool.name ?? ''),
         arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}),
       }
@@ -73,21 +78,6 @@ function convertBlock(block: unknown): ContentBlock | undefined {
   }
 }
 
-/** Extract the text payload of a Pi user/assistant message for the prompt command. */
-function extractPiMessageText(message: unknown): string {
-  if (!message || typeof message !== 'object') return ''
-  const record = message as { content?: unknown }
-  if (typeof record.content === 'string') return record.content
-  if (!Array.isArray(record.content)) return ''
-  return record.content
-    .map((block: unknown) => {
-      if (!block || typeof block !== 'object') return ''
-      const text = (block as { text?: unknown }).text
-      return typeof text === 'string' ? text : ''
-    })
-    .join('\n')
-}
-
 /** Extract the text payload of a DSH UserMessage for the Pi prompt command. */
 function extractDshText(message: UserMessage): string {
   return message.content
@@ -95,17 +85,25 @@ function extractDshText(message: UserMessage): string {
     .join('\n')
 }
 
+/** Per-step live stream bookkeeping for one Pi run attempt. */
+interface StreamAttempt {
+  readonly id: LlmAttemptId
+  readonly revision: number
+  index: number
+  committed: boolean
+}
+
 export class PiAgent implements Agent {
   readonly id: SessionId
   readonly options: AgentOptions
   readonly session: Session
-  readonly inbox: Inbox
+  readonly inbox: PiInbox
   readonly ctx: Context
 
   private readonly rpc: PiRpcClient
   private readonly cwd: string
   private readonly scope: Scope
-  private readonly dispatch: ReturnType<typeof agentEvents>
+  private readonly dispatch: AgentEventDispatch
   private readonly disposeScope: () => Promise<void> | void
   private readonly unwatch: () => void
 
@@ -118,8 +116,10 @@ export class PiAgent implements Agent {
   private firstAssistant = true
   private aborted = false
   private settleResolvers: (() => void)[] = []
-  private chunkSeqs: number[] = []
-  private readonly toolCallSeqs = new Map<string, number>()
+  private attemptCounter = 0
+  private attempt: StreamAttempt | null = null
+  private stream = new AssistantStreamAccumulator()
+  private readonly toolCallSeqs = new Map<string, SessionSeq>()
   private currentProvider = ''
   private currentModel = ''
 
@@ -130,18 +130,13 @@ export class PiAgent implements Agent {
     this.options = options.agentOptions
     this.session = options.session
     // DSH contract: each Agent owns a scope keyed by ITSELF (an object — the
-    // scope key feeds WeakMaps downstream), and its ctx shadows `agent` with
-    // an own property, so creation-window setup (`childCtx.agent`), prompt
-    // assembly, and tools all resolve the live agent from its scoped context.
-    this.scope = createScope(options.ctx, this)
-    this.ctx = this.scope.ctx.extend({ agent: this })
-    this.disposeScope = () => void this.scope.dispose()
-    this.inbox = new Inbox(this.session, {
-      inserted: (message) => this.dispatch.emit('agent/inbox/inserted', { message }),
-      discarded: (message) => this.dispatch.emit('agent/inbox/discarded', { message }),
-      claimed: (message, turn) => this.dispatch.emit('agent/inbox/claimed', { message, turn }),
-    })
+    // scope key feeds WeakMaps downstream). The fused dispatcher is built
+    // before the inbox because inbox notifications dispatch through it.
     this.dispatch = agentEvents(options.ctx, this)
+    this.scope = createScope(options.ctx, this)
+    this.ctx = this.scope.ctx
+    this.disposeScope = () => void this.scope.dispose()
+    this.inbox = new PiInbox(options.session, this.dispatch)
     this.unwatch = this.rpc.onEvent((event) => this.onPiEvent(event))
     this.emitStatus('idle')
   }
@@ -218,34 +213,29 @@ export class PiAgent implements Agent {
 
   private async runDriver(): Promise<void> {
     while (!this.aborted) {
-      const next = this.inbox.nextTurn[0]
-      if (next === undefined) break
-      this.inbox.remove(next.id)
-      await this.runTurn(next)
+      if (this.inbox.nextTurn.length === 0) break
+      await this.runTurn()
     }
     this.aborted = false
   }
 
-  private async runTurn(message: UserMessage): Promise<void> {
+  private async runTurn(): Promise<void> {
     this.setStatus('running')
     this.turn += 1
     this.step = 0
     this.firstAssistant = true
     this.aborted = false
-    this.chunkSeqs = []
     const turn = this.turn
     let endReason: TurnEndReason = { kind: 'completed' }
     try {
       this.session.append('turn/start', { turn })
+      // Claim all pending steering plus exactly one queued turn. The batch is
+      // what this turn admits, in inbox order.
+      const claimed = this.inbox.claim('next-turn', turn)
+      if (claimed.length === 0) return
       this.openStep()
-      this.session.append('user/message', message, { surfaceOp: 'append' })
-      // Collect pending next-step messages (steer/inject) into this prompt.
-      const steerText = this.inbox.nextStep
-        .map((steered) => extractDshText(steered))
-        .join('\n')
-      const steeredIds = this.inbox.nextStep.map((steered) => steered.id)
-      for (const id of steeredIds) this.inbox.remove(id)
-      const promptText = steerText === '' ? extractDshText(message) : `${extractDshText(message)}\n${steerText}`
+      for (const message of claimed) this.session.append('user/message', message, { surfaceOp: 'append' })
+      const promptText = claimed.map((message) => extractDshText(message)).join('\n')
       await this.rpc.prompt(promptText)
       // Wait until Pi reports the run settled.
       await this.waitSettled()
@@ -273,12 +263,40 @@ export class PiAgent implements Agent {
     if (this.stepOpen) return
     this.step += 1
     this.stepOpen = true
-    this.chunkSeqs = []
     this.session.append('step/start', { turn: this.turn, step: this.step })
+    this.stream = new AssistantStreamAccumulator()
+    this.attempt = {
+      id: LlmAttemptId(`pi-${String(this.id)}-${this.turn}-${this.step}-${++this.attemptCounter}`),
+      revision: 1,
+      index: 0,
+      committed: false,
+    }
+    this.dispatch.emit('agent/assistant-stream', {
+      frame: {
+        type: 'start',
+        attemptId: this.attempt.id,
+        revision: this.attempt.revision,
+        turn: this.turn,
+        step: this.step,
+      },
+    })
   }
 
   private closeStep(): void {
     if (!this.stepOpen) return
+    const attempt = this.attempt
+    if (attempt !== null && !attempt.committed) {
+      this.dispatch.emit('agent/assistant-stream', {
+        frame: {
+          type: 'end',
+          attemptId: attempt.id,
+          revision: attempt.revision,
+          index: attempt.index,
+          outcome: { kind: 'abandoned' },
+        },
+      })
+    }
+    this.attempt = null
     this.stepOpen = false
     this.session.append('step/end', { turn: this.turn, step: this.step })
   }
@@ -309,25 +327,22 @@ export class PiAgent implements Agent {
         this.openStep()
         switch (assistantEvent.type) {
           case 'text_delta': {
-            const chunk: StreamChunk = { type: 'text-delta', index, text: assistantEvent.delta ?? assistantEvent.text ?? '' }
-            this.appendChunk(chunk)
+            this.appendChunk({ type: 'text-delta', index, text: assistantEvent.delta ?? assistantEvent.text ?? '' })
             return
           }
           case 'thinking_delta': {
-            const chunk: StreamChunk = { type: 'reasoning-delta', index, text: assistantEvent.delta ?? assistantEvent.text ?? '' }
-            this.appendChunk(chunk)
+            this.appendChunk({ type: 'reasoning-delta', index, text: assistantEvent.delta ?? assistantEvent.text ?? '' })
             return
           }
           case 'toolcall_delta': {
             const tool = assistantEvent.toolCall
-            const chunk: StreamChunk = {
+            this.appendChunk({
               type: 'tool-call-delta',
               index,
-              id: CallId(String(tool?.id ?? '')),
+              id: ToolCallId(String(tool?.id ?? '')),
               ...(tool?.name !== undefined ? { name: tool.name } : {}),
               argumentsDelta: assistantEvent.delta ?? '',
-            }
-            this.appendChunk(chunk)
+            })
             return
           }
           default:
@@ -347,7 +362,8 @@ export class PiAgent implements Agent {
         this.currentProvider = sourceProvider
         this.currentModel = sourceModel
         this.openStep()
-        this.session.append(
+        const stream: AssistantStreamRecord[] = [...this.stream.snapshot()]
+        const settled = this.session.append(
           'assistant/message',
           {
             turn: this.turn,
@@ -356,14 +372,29 @@ export class PiAgent implements Agent {
               content: blocks,
               source: { provider: sourceProvider, model: sourceModel },
             }),
+            stream,
           },
-          { surfaceOp: 'append', sourceEventSeqs: this.chunkSeqs },
+          { surfaceOp: 'append' },
         )
+        const attempt = this.attempt
+        if (attempt !== null) {
+          attempt.committed = true
+          this.dispatch.emit('agent/assistant-stream', {
+            frame: {
+              type: 'end',
+              attemptId: attempt.id,
+              revision: attempt.revision,
+              index: attempt.index,
+              outcome: { kind: 'committed', eventType: 'assistant/message', seq: settled.seq },
+            },
+          })
+          this.attempt = null
+        }
         return
       }
       case 'tool_execution_start': {
         const start = event as { toolCallId?: unknown; toolName?: unknown; args?: unknown }
-        const callId = CallId(String(start.toolCallId ?? ''))
+        const callId = ToolCallId(String(start.toolCallId ?? ''))
         const name = String(start.toolName ?? '')
         const args = start.args
         const argumentsText = typeof args === 'string' ? args : JSON.stringify(args ?? {})
@@ -373,7 +404,7 @@ export class PiAgent implements Agent {
       }
       case 'tool_execution_end': {
         const end = event as { toolCallId?: unknown; toolName?: unknown; result?: unknown; isError?: boolean }
-        const callId = CallId(String(end.toolCallId ?? ''))
+        const callId = ToolCallId(String(end.toolCallId ?? ''))
         const resultText = typeof end.result === 'string'
           ? end.result
           : JSON.stringify(end.result ?? '')
@@ -391,13 +422,9 @@ export class PiAgent implements Agent {
         )
         return
       }
-      case 'agent_settled': {
-        const resolvers = this.settleResolvers.splice(0)
-        for (const resolve of resolvers) resolve()
-        return
-      }
+      case 'agent_settled':
       case 'agent_end': {
-        // The run is finished; settle waiters in case agent_settled was missed.
+        // The run is finished; settle waiters in case `agent_settled` was missed.
         const resolvers = this.settleResolvers.splice(0)
         for (const resolve of resolvers) resolve()
         return
@@ -408,14 +435,26 @@ export class PiAgent implements Agent {
   }
 
   private appendChunk(chunk: StreamChunk): void {
-    this.chunkSeqs.push(this.session.append('assistant/chunk', { turn: this.turn, step: this.step, chunk }).seq)
+    this.openStep()
+    const attempt = this.attempt
+    if (attempt === null) return
+    const timed = this.stream.push({ time: Date.now(), chunk })
+    this.dispatch.emit('agent/assistant-stream', {
+      frame: {
+        type: 'chunk',
+        attemptId: attempt.id,
+        revision: attempt.revision,
+        index: attempt.index++,
+        time: timed.time,
+        chunk: timed.chunk,
+      },
+    })
   }
 
   /** Tear down: stop Pi and unwind the scoped context. */
   dispose(): void {
     this.unwatch()
     this.rpc.close()
-    this.session.append('session/end-seed', {})
     void this.disposeScope()
   }
 }
@@ -429,8 +468,4 @@ export function createPiAgent(options: {
   cwd: string
 }): PiAgent {
   return new PiAgent(options)
-}
-
-export function scopeKeyFor(agent: PiAgent): ScopeKey {
-  return agent.id as unknown as ScopeKey
 }
